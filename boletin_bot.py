@@ -5,8 +5,8 @@ Bot Boletín Oficial CABA
 2. Procesa todos los boletines nuevos desde el último que ya tenía
    (normalmente uno; si algún día falló, recupera los que faltaron):
    - agrega sus normas a la base histórica  data/normas_AAAA.csv
-   - regenera el Excel histórico           salida/boletin_caba_historico.xlsx
-   - manda un resumen por boletín + el Excel al canal de Telegram
+   - manda al canal un resumen + un Excel liviano con las normas del día
+   - el Excel histórico completo se manda solo a pedido (--historico)
 3. Si no hay nada nuevo (ya procesado o todavía no salió) termina sin enviar nada.
 
 Pensado para correr 4 veces por día: la primera corrida que encuentra el
@@ -22,6 +22,7 @@ Uso:
   python boletin_bot.py --desde 7275    # carga histórica desde ese N° de boletín
   python boletin_bot.py --no-telegram   # no enviar nada, solo actualizar datos
   python boletin_bot.py --forzar        # reprocesar el último boletín
+  python boletin_bot.py --historico     # mandar también el Excel histórico
   python boletin_bot.py --json x.json   # procesar un JSON guardado (pruebas)
 """
 
@@ -233,7 +234,10 @@ def _tabla_cruzada(ws, df, filas, columnas, titulo, etiqueta_filas):
     _titulo(ws, titulo)
 
 
-def generar_excel(base: pd.DataFrame) -> Path:
+def generar_excel(base: pd.DataFrame, destino: Path = EXCEL,
+                  diario: bool = False) -> Path:
+    """Arma el Excel. diario=True: versión liviana de un solo boletín
+    (sin las pestañas por mes y por día, que no aportan para un día)."""
     SALIDA.mkdir(parents=True, exist_ok=True)
     df = base.copy()
     df["Período"] = df["Año"].astype(str) + " · " + df["Mes"]
@@ -265,8 +269,10 @@ def generar_excel(base: pd.DataFrame) -> Path:
     ws.auto_filter.ref = ws.dimensions
 
     # 2) Mes x Tipo de Norma (como la tabla de Cultura, pero de todo)
-    _tabla_cruzada(wb.create_sheet("Tabla_Resumen"), df, "Período",
-                   "Tipo de Norma", "Normas por mes y tipo de norma", "Mes")
+    if not diario:
+        _tabla_cruzada(wb.create_sheet("Tabla_Resumen"), df, "Período",
+                       "Tipo de Norma", "Normas por mes y tipo de norma",
+                       "Mes")
     # 3) Organismo x Tipo de Norma
     _tabla_cruzada(wb.create_sheet("Por_Organismo"), df, "Organismo",
                    "Tipo de Norma", "Normas por organismo y tipo de norma",
@@ -275,6 +281,10 @@ def generar_excel(base: pd.DataFrame) -> Path:
     _tabla_cruzada(wb.create_sheet("Por_Poder"), df, "Poder",
                    "Tipo de Norma", "Normas por poder y tipo de norma",
                    "Poder / Sección")
+
+    if diario:
+        wb.save(destino)
+        return destino
 
     # 5) Serie diaria
     ws = wb.create_sheet("Por_Dia")
@@ -297,8 +307,16 @@ def generar_excel(base: pd.DataFrame) -> Path:
     ws.freeze_panes = "A6"
     _titulo(ws, "Normas publicadas por boletín")
 
-    wb.save(EXCEL)
-    return EXCEL
+    wb.save(destino)
+    return destino
+
+
+def cargar_base() -> pd.DataFrame:
+    partes = [pd.read_csv(p, dtype=str, keep_default_na=False)
+              for p in sorted(DATA_DIR.glob("normas_*.csv"))]
+    if not partes:
+        return pd.DataFrame(columns=COLUMNAS)
+    return pd.concat(partes, ignore_index=True)
 
 
 # ───────────────────────────── Telegram ──────────────────────────────
@@ -393,13 +411,12 @@ def enviar_mensaje(texto: str) -> None:
         "parse_mode": "HTML", "disable_web_page_preview": "true"})
 
 
-def enviar_excel(excel: Path, fecha: datetime, pie: str) -> None:
+def enviar_excel(excel: Path, nombre: str, pie: str) -> None:
     with open(excel, "rb") as fh:
         telegram("sendDocument",
                  data={"chat_id": os.environ["TELEGRAM_CHAT_ID"],
                        "caption": pie},
-                 files={"document": (
-                     f"boletin_caba_historico_{fecha:%Y-%m-%d}.xlsx", fh)})
+                 files={"document": (nombre, fh)})
 
 
 # ───────────────────────────── Main ──────────────────────────────────
@@ -410,6 +427,9 @@ def main() -> int:
                     default=int(os.environ["DESDE"]) if os.environ.get("DESDE")
                     else None,
                     help="N° de boletín desde el cual cargar (carga histórica)")
+    ap.add_argument("--historico", action="store_true",
+                    default=os.environ.get("HISTORICO", "").lower() == "true",
+                    help="mandar también el Excel histórico completo")
     ap.add_argument("--json", nargs="+",
                     help="procesar JSON guardados en vez de la API (pruebas)")
     ap.add_argument("--no-telegram", action="store_true")
@@ -430,9 +450,10 @@ def main() -> int:
             ultimo = descargar(0)
         except Exception as ex:  # API caída: se reintenta en la próxima corrida
             print(f"No se pudo consultar la API: {ex}")
-            return 0
-        ultimo_pub = int(ultimo["boletin"]["numero"])
-        datos = {ultimo_pub: ultimo}
+            ultimo, ultimo_pub, datos = None, 0, {}
+        else:
+            ultimo_pub = int(ultimo["boletin"]["numero"])
+            datos = {ultimo_pub: ultimo}
 
     if args.desde:
         inicio = args.desde
@@ -443,15 +464,14 @@ def main() -> int:
     else:
         inicio = ultimo_pub        # primera vez: arranca por el de hoy
 
-    if inicio > ultimo_pub:
+    pendientes = [n for n in range(inicio, ultimo_pub + 1)
+                  if ultimo_pub and (not args.json or n in datos)]
+    if pendientes:
+        print(f"Boletines a procesar: {pendientes[0]} a {pendientes[-1]} "
+              f"({len(pendientes)})")
+    elif ultimo_pub:
         print(f"Sin novedades: el último publicado es el N° {ultimo_pub} "
               "y ya está procesado.")
-        return 0
-
-    pendientes = [n for n in range(inicio, ultimo_pub + 1)
-                  if not args.json or n in datos]
-    print(f"Boletines a procesar: {pendientes[0]} a {pendientes[-1]} "
-          f"({len(pendientes)})")
 
     # 2) Descargar y aplanar
     nuevos = []
@@ -479,37 +499,59 @@ def main() -> int:
         nuevos.append((info, filas))
         print(f"  N° {n} ({info['fecha']:%d/%m/%Y}): {len(filas)} normas")
 
-    if not nuevos:
+    carga_historica = len(nuevos) > MAX_RESUMENES
+    mandar_historico = args.historico or carga_historica
+    if not nuevos and not mandar_historico:
         return 0
 
-    # 3) Base histórica + Excel
-    todas = [f for _, filas in nuevos for f in filas]
-    base = actualizar_base(todas, {i["numero"] for i, _ in nuevos})
-    excel = generar_excel(base)
-    print(f"Base histórica: {len(base)} normas. Excel: {excel}")
+    # 3) Base histórica (+ Excel histórico completo, queda como artefacto)
+    if nuevos:
+        todas = [f for _, filas in nuevos for f in filas]
+        base = actualizar_base(todas, {i["numero"] for i, _ in nuevos})
+    else:
+        base = cargar_base()
+    if base.empty:
+        print("Todavía no hay datos acumulados.")
+        return 0
+    excel_hist = generar_excel(base)
+    print(f"Base histórica: {len(base)} normas. Excel: {excel_hist}")
 
     # 4) Telegram
+    #    Diario: resumen + Excel liviano con las normas de ese boletín.
+    #    Histórico completo: solo a pedido o en una carga histórica.
     if not args.no_telegram:
-        if len(nuevos) <= MAX_RESUMENES:
+        if carga_historica:
+            enviar_mensaje(armar_carga_historica(nuevos, base))
+        else:
             for info, filas in nuevos:
                 enviar_mensaje(armar_resumen(info, filas))
-        else:
-            enviar_mensaje(armar_carga_historica(nuevos, base))
-        enviar_excel(excel, nuevos[-1][0]["fecha"], pie_historico(base))
+                dia = pd.DataFrame(filas, columns=COLUMNAS).astype(str)
+                nombre = (f"boletin_caba_{info['fecha']:%Y-%m-%d}"
+                          f"_N{info['numero']}.xlsx")
+                xl = generar_excel(dia, SALIDA / nombre, diario=True)
+                enviar_excel(xl, nombre,
+                             f"Normas del Boletín N° {info['numero']} "
+                             f"({info['fecha']:%d/%m/%Y})")
+        if mandar_historico:
+            hoy = datetime.now()
+            enviar_excel(excel_hist,
+                         f"boletin_caba_historico_{hoy:%Y-%m-%d}.xlsx",
+                         pie_historico(base))
         print("Enviado a Telegram.")
 
     # 5) Estado (solo avanza hasta lo procesado con éxito)
-    ult_info = nuevos[-1][0]
-    if not ultimo_proc or ult_info["numero"] > int(ultimo_proc):
-        estado["ultimo_numero"] = ult_info["numero"]
-    estado["ultima_corrida"] = {
-        "numero": ult_info["numero"],
-        "fecha": ult_info["fecha"].strftime("%Y-%m-%d"),
-        "boletines": len(nuevos),
-        "normas": len(todas),
-        "procesado": datetime.now().isoformat(timespec="seconds"),
-    }
-    guardar_estado(estado)
+    if nuevos:
+        ult_info = nuevos[-1][0]
+        if not ultimo_proc or ult_info["numero"] > int(ultimo_proc):
+            estado["ultimo_numero"] = ult_info["numero"]
+        estado["ultima_corrida"] = {
+            "numero": ult_info["numero"],
+            "fecha": ult_info["fecha"].strftime("%Y-%m-%d"),
+            "boletines": len(nuevos),
+            "normas": len(todas),
+            "procesado": datetime.now().isoformat(timespec="seconds"),
+        }
+        guardar_estado(estado)
     return 0
 
 
