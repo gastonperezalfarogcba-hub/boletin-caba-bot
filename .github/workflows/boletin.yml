@@ -15,6 +15,10 @@ on:
         description: "Carga histórica: N° de boletín inicial (7275 = 02/01/2026). Vacío = corrida normal"
         required: false
         default: ""
+      historico:
+        description: "Mandar también el Excel histórico completo"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -41,6 +45,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DESDE: ${{ github.event.inputs.desde }}
+          HISTORICO: ${{ github.event.inputs.historico }}
+          PYTHONUNBUFFERED: "1"   # para ver el avance en vivo en el log
         run: python boletin_bot.py
 
       - name: Guardar base histórica en el repo
@@ -53,6 +59,7 @@ jobs:
             echo "Sin cambios."
           else
             git commit -m "Boletín $(python -c "import json;print(json.load(open('data/estado.json'))['ultimo_numero'])")"
+            git pull --rebase   # por si el repo cambió mientras corría
             git push
           fi
 
