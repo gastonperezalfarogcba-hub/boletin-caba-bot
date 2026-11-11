@@ -1,15 +1,10 @@
 name: Boletín Oficial CABA
 
 on:
-  schedule:
-    # Lunes a viernes, 4 intentos (hora Argentina = UTC-3):
-    # 08:30, 10:30, 13:00 y 17:00. El primero que encuentra el boletín nuevo
-    # lo procesa; los demás no hacen nada.
-    - cron: "30 11 * * 1-5"
-    - cron: "30 13 * * 1-5"
-    - cron: "0 16 * * 1-5"
-    - cron: "0 20 * * 1-5"
-  workflow_dispatch:   # botón "Run workflow" para correrlo a mano
+      schedule:
+       # Lunes a viernes a las 10, 11, 12, 14, 16 y 18 (hora Argentina = UTC-3).
+       # El primero que encuentra el boletín nuevo lo procesa; los demás no hacen nada.
+       - cron: "0 13,14,15,17,19,21 * * 1-5"  workflow_dispatch:   # botón "Run workflow" para correrlo a mano
     inputs:
       desde:
         description: "Carga histórica: N° de boletín inicial (7275 = 02/01/2026). Vacío = corrida normal"
